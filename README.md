@@ -4,7 +4,8 @@ Creating a module to extract HRRR data to create Convergence/Divergence, Vortici
 For this project, I initially wanted to do something involving EFM data. Unfortunately, the code for EFM data was in binary and I have no experience using binary data. After taking an entire day trying to figure it out, I realized I didn't want to subject myself to that during finals week. So, I pivoted and looked for something where I can easily extract data since data extraction is a weakness of mine. AWS S3 Explorer (https://hrrrzarr.s3.amazonaws.com/index.html#sfc/), is something that we are actually using in AES 551 to extract data for our sea breeze project. I obviously wanted to do someting different from AES 551 so that I am not just copying. I initially wanted to look into snowstorms and analyze a specific snowstorm, but halfway through I realized I needed to just make a module that anyone can use for themselves. So, I created a module that extracts the HRRR data and returns 4 plots decided by the user. It's simple for a user, since they do not need to change anything except for the stuff under the if==main section at the end. This code was created by ChatGPT and Claude AI, after days of my input.    
 
 A Walkthrough:
-First, there are multiple import lines where the packages needed for the code are imported. Then, I have the one constant used in this module labeled as a constant by its ALL CAPS. 
+
+- First, there are multiple import lines where the packages needed for the code are imported. Then, I have the one constant used in this module labeled as a constant by its ALL CAPS. 
 
 1. HRRR Data Acess
 def get_store is a function that accesses the HRRR model data and stores the data so the user doesn't have to download any files to their computer.
