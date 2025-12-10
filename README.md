@@ -31,3 +31,7 @@ Here, we have the code that creates the contour plots based on our diagnostic eq
 This is where the user can have freedom to analyze whichever day and diagnostic equation they want. The data goes back to August, 2016 up until this day.
 The user can change the day, time in UTC, latitude and longitude, and half width.
 They can also decide which plots get returned by using True/False, where using True returns the plot and using False doesn't return the plot. 
+
+
+
+Lastly, I (AKA Claude AI) created fake data to use with my code in order to determine that my code is useful for data from somewhere else. My dummy test shows that my code isn't just an AI hallucination, rather it is actually using the data to create plots. 
