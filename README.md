@@ -25,7 +25,7 @@ A Walkthrough:
 - Lastly, lat/lon axes are created for the plots to get a better visualization of the region.
 
 
-5. Main Worflow
+5. Main Workflow
 - Here, we have the code that creates the contour plots based on our diagnostic equations. Since in the if==main section the user decides which plots to be returned, we need code that can return or not return the plots.
 
 6. If == Main
