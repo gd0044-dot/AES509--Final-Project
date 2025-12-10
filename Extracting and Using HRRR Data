@@ -1,0 +1,193 @@
+import s3fs
+import zarr
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from scipy.interpolate import griddata
+
+
+# -----------------------------
+# 1. HRRR Data Access
+# -----------------------------
+def get_store(day, hour, level_type="prs", model_type="anl"):
+    fs = s3fs.S3FileSystem(anon=True)
+    url = f"s3://hrrrzarr/{level_type}/{day}/{day}_{hour}z_{model_type}.zarr"
+    return zarr.open(s3fs.S3Map(root=url, s3=fs, check=False))
+
+
+def get_grid():
+    fs = s3fs.S3FileSystem(anon=True)
+    grid = zarr.open(s3fs.S3Map("s3://hrrrzarr/grid/HRRR_chunk_index.zarr", s3=fs, check=False))
+    return grid["latitude"][:], grid["longitude"][:]
+
+
+def load_h85(store):
+    return store["850mb/UGRD/850mb/UGRD"][:], store["850mb/VGRD/850mb/VGRD"][:], store["850mb/TMP/850mb/TMP"][:]
+
+
+# -----------------------------
+# 2. Subsetting
+# -----------------------------
+def subset_box(u, v, t, lats, lons, center_lat, center_lon, half_width=1.0):
+    lat_idx = np.where((lats[:, 0] >= center_lat - half_width) & (lats[:, 0] <= center_lat + half_width))[0]
+    lon_idx = np.where((lons[0, :] >= center_lon - half_width) & (lons[0, :] <= center_lon + half_width))[0]
+    i0, i1 = lat_idx[0], lat_idx[-1]
+    j0, j1 = lon_idx[0], lon_idx[-1]
+    return (u[i0:i1 + 1, j0:j1 + 1], v[i0:i1 + 1, j0:j1 + 1], t[i0:i1 + 1, j0:j1 + 1],
+            lats[i0:i1 + 1, j0:j1 + 1], lons[i0:i1 + 1, j0:j1 + 1])
+
+
+# -----------------------------
+# 3. Diagnostics
+# -----------------------------
+def vorticity(u, v, lats, lons):
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    R = 6371000
+    dy = np.gradient(lat_r, axis=0) * R
+    dx = np.gradient(lon_r, axis=1) * R * np.cos(lat_r)
+    return np.gradient(v, axis=1) / dx - np.gradient(u, axis=0) / dy
+
+
+def convergence(u, v, lats, lons):
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    R = 6371000
+    dy = np.gradient(lat_r, axis=0) * R
+    dx = np.gradient(lon_r, axis=1) * R * np.cos(lat_r)
+    return np.gradient(u, axis=1) / dx + np.gradient(v, axis=0) / dy
+
+
+def temp_advection(u, v, t, lats, lons):
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    R = 6371000
+    dy = np.gradient(lat_r, axis=0) * R
+    dx = np.gradient(lon_r, axis=1) * R * np.cos(lat_r)
+    return -(u * np.gradient(t, axis=1) / dx + v * np.gradient(t, axis=0) / dy)
+
+
+def frontogenesis(u, v, t, lats, lons):
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    R = 6371000
+    dy = np.gradient(lat_r, axis=0) * R
+    dx = np.gradient(lon_r, axis=1) * R * np.cos(lat_r)
+    dT_dx = np.gradient(t, axis=1) / dx
+    dT_dy = np.gradient(t, axis=0) / dy
+    du_dx = np.gradient(u, axis=1) / dx
+    dv_dy = np.gradient(v, axis=0) / dy
+
+    # Simplified frontogenesis: |∇T| × (-divergence)
+    # Convergence (negative divergence) = positive frontogenesis
+    grad_T_mag = np.sqrt(dT_dx ** 2 + dT_dy ** 2)
+    divergence = du_dx + dv_dy
+    return -grad_T_mag * divergence
+
+
+
+# -----------------------------
+# 4. Plotting (axes-only lat/lon, robust interp)
+# -----------------------------
+def plot_field(field, u, v, lats, lons, title, t_field=None, cmap="bwr", levels=20, interp_factor=3):
+    # Create fine grid
+    nlat, nlon = lats.shape[0] * interp_factor, lats.shape[1] * interp_factor
+    lat_new = np.linspace(lats.min(), lats.max(), nlat)
+    lon_new = np.linspace(lons.min(), lons.max(), nlon)
+    lon_new2d, lat_new2d = np.meshgrid(lon_new, lat_new)
+
+    # Interpolate with fallback for NaNs
+    points = np.column_stack((lats.flatten(), lons.flatten()))
+    values = field.flatten()
+    field_fine = griddata(points, values, (lat_new2d, lon_new2d), method='linear')
+    # Fill remaining NaNs with nearest
+    nan_mask = np.isnan(field_fine)
+    if np.any(nan_mask):
+        field_fine[nan_mask] = griddata(points, values, (lat_new2d[nan_mask], lon_new2d[nan_mask]), method='nearest')
+
+    # Normalize
+    vmin, vmax = np.nanmin(field_fine), np.nanmax(field_fine)
+    if np.isclose(vmin, vmax):
+        vmax = vmin + 1e-6
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+
+    # 2D plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    cf = ax.contourf(lon_new2d, lat_new2d, field_fine, levels=levels, cmap=cmap, norm=norm)
+    plt.colorbar(cf, label=title)
+
+    # Wind vectors
+    step = max(1, int(u.shape[0] / 30))
+    ax.quiver(lons[::step, ::step], lats[::step, ::step],
+              u[::step, ::step], v[::step, ::step],
+              width=0.003, scale=200, headwidth=3.5)
+
+    # Optional temperature lines
+    if t_field is not None:
+        t_fine = griddata(points, t_field.flatten(), (lat_new2d, lon_new2d), method='linear')
+        t_nan_mask = np.isnan(t_fine)
+        if np.any(t_nan_mask):
+            t_fine[t_nan_mask] = griddata(points, t_field.flatten(),
+                                          (lat_new2d[t_nan_mask], lon_new2d[t_nan_mask]), method='nearest')
+        cs = ax.contour(lon_new2d, lat_new2d, t_fine, colors='black', linewidths=1)
+        ax.clabel(cs, inline=1, fontsize=10, fmt="%1.0f K")
+
+    # Axes only
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(title)
+    plt.show()
+
+
+# -----------------------------
+# 5. Main workflow
+# -----------------------------
+def main(day, hour, clat, clon, half_width, plots_to_generate):
+    store = get_store(day, hour, level_type="prs", model_type="anl")
+    lats, lons = get_grid()
+    u, v, t = load_h85(store)
+
+    u_s, v_s, t_s, lat_s, lon_s = subset_box(u, v, t, lats, lons, clat, clon, half_width)
+
+    # Generate selected plots
+    if plots_to_generate.get('vorticity', False):
+        plot_field(vorticity(u_s, v_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Vorticity", t_field=t_s)
+
+    if plots_to_generate.get('convergence', False):
+        plot_field(convergence(u_s, v_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Convergence", t_field=t_s)
+
+    if plots_to_generate.get('temp_advection', False):
+        plot_field(temp_advection(u_s, v_s, t_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Temp Advection",
+                   t_field=t_s)
+
+    if plots_to_generate.get('frontogenesis', False):
+        plot_field(frontogenesis(u_s, v_s, t_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Frontogenesis",
+                   t_field=t_s)
+
+
+if __name__ == "__main__":
+    # ========================================
+    # USER CONFIGURATION - EDIT THIS SECTION
+    # ========================================
+
+    # Data parameters
+    day = "20210202"
+    hour = "12"
+    clat, clon = 40.0, -95.0
+    half_width = 2.0
+
+    # Select which plots to generate (True = plot, False = skip)
+    plots_to_generate = {
+        'vorticity': True,
+        'convergence': True,
+        'temp_advection': True,
+        'frontogenesis': True
+    }
+
+    # ========================================
+    # END USER CONFIGURATION
+    # ========================================
+
+    main(day, hour, clat, clon, half_width, plots_to_generate)
