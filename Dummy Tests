@@ -1,0 +1,601 @@
+"""
+HRRR 850mb Meteorological Diagnostics Module - MOCK VERSION
+
+This module provides the same interface as the real HRRR module but uses
+dummy/mock data instead of AWS S3. Perfect for testing without internet access.
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
+from scipy.interpolate import griddata
+
+# Constants
+RADIUS_EARTH = 6371000  # Earth's radius in meters
+
+
+# -----------------------------
+# MOCK DATA GENERATORS
+# -----------------------------
+def _generate_mock_grid(center_lat=40.0, center_lon=-95.0, half_width=2.0):
+    """Generate a mock HRRR-like grid."""
+    # Create grid with similar density to HRRR subset
+    nlat = int(half_width * 2 * 50)  # ~50 points per degree
+    nlon = int(half_width * 2 * 50)
+
+    lat_1d = np.linspace(center_lat - half_width, center_lat + half_width, nlat)
+    lon_1d = np.linspace(center_lon - half_width, center_lon + half_width, nlon)
+    lons, lats = np.meshgrid(lon_1d, lat_1d)
+    return lats, lons
+
+
+def _generate_mock_winds(lats, lons, pattern='cyclone'):
+    """Generate mock wind fields."""
+    center_lat = lats.mean()
+    center_lon = lons.mean()
+    dlat = lats - center_lat
+    dlon = lons - center_lon
+
+    if pattern == 'cyclone':
+        # Cyclonic vortex
+        r = np.sqrt(dlat ** 2 + dlon ** 2)
+        radius_deg = 1.5
+        r_norm = r / radius_deg
+        speed = 25.0 * r_norm * np.exp(1 - r_norm)
+        theta = np.arctan2(dlat, dlon)
+        u = -speed * np.sin(theta)
+        v = speed * np.cos(theta)
+    elif pattern == 'jet':
+        # Jet stream
+        jet_width = 1.5
+        u = 40.0 * np.exp(-(dlat / jet_width) ** 2)
+        v = 5.0 * np.sin(2 * np.pi * dlon / 8.0) * np.exp(-(dlat / jet_width) ** 2)
+    elif pattern == 'convergence':
+        # Convergence zone
+        u = 10.0 * np.sign(dlon) * (1 - np.exp(-abs(dlon)))
+        v = -15.0 * np.sign(dlat) * (1 - np.exp(-abs(dlat) / 2))
+    else:
+        # Default: simple flow
+        u = 10.0 * np.ones_like(lats)
+        v = 5.0 * np.ones_like(lats)
+
+    # Add some noise for realism
+    u += np.random.randn(*u.shape) * 2.0
+    v += np.random.randn(*v.shape) * 2.0
+
+    return u, v
+
+
+def _generate_mock_temperature(lats, lons, pattern='front'):
+    """Generate mock temperature field."""
+    center_lat = lats.mean()
+    center_lon = lons.mean()
+    dlat = lats - center_lat
+    dlon = lons - center_lon
+
+    if pattern == 'front':
+        # Temperature front
+        warm_temp = 285.0
+        cold_temp = 268.0
+        front_width = 1.0
+        t = cold_temp + (warm_temp - cold_temp) * (1 + np.tanh(dlat / front_width)) / 2
+        # Add east-west variation
+        t += 3.0 * np.sin(2 * np.pi * dlon / 5.0)
+    else:
+        # Simple gradient
+        t = 278.0 - 5.0 * dlat
+
+    # Add noise
+    t += np.random.randn(*t.shape) * 0.5
+
+    return t
+
+
+# -----------------------------
+# 1. HRRR Data Access (MOCK)
+# -----------------------------
+def get_store(day, hour, level_type="prs", model_type="anl"):
+    """
+    MOCK: Access HRRR model data from AWS S3 Zarr archive.
+
+    Instead of real data, returns a mock store object.
+
+    Parameters
+    ----------
+    day : str
+        Date in YYYYMMDD format (e.g., '20210202').
+    hour : str
+        Hour in HH format, 00-23 (e.g., '12').
+    level_type : str, optional
+        Vertical coordinate type. Default is 'prs' (pressure levels).
+    model_type : str, optional
+        Model run type. Default is 'anl' (analysis). Use 'fcst' for forecast.
+
+    Returns
+    -------
+    dict
+        Mock store containing metadata for generating data.
+    """
+    print(f"[MOCK] Loading data for {day} at {hour}Z")
+    return {
+        'day': day,
+        'hour': hour,
+        'level_type': level_type,
+        'model_type': model_type,
+        'mock': True
+    }
+
+
+def get_grid():
+    """
+    MOCK: Retrieve HRRR latitude-longitude grid from AWS S3.
+
+    Returns a full HRRR-sized grid (smaller than real for speed).
+
+    Returns
+    -------
+    lats : ndarray
+        Latitude values in degrees, shape (530, 900).
+    lons : ndarray
+        Longitude values in degrees, shape (530, 900).
+    """
+    print("[MOCK] Loading grid")
+    # Smaller than real HRRR but same concept
+    nlat, nlon = 530, 900
+    lats_1d = np.linspace(20.0, 52.0, nlat)
+    lons_1d = np.linspace(-130.0, -60.0, nlon)
+    lons, lats = np.meshgrid(lons_1d, lats_1d)
+    return lats, lons
+
+
+def load_h85(store):
+    """
+    MOCK: Load 850 mb wind and temperature fields from HRRR Zarr store.
+
+    Parameters
+    ----------
+    store : dict
+        Mock store returned by get_store().
+
+    Returns
+    -------
+    u : ndarray
+        Zonal (eastward) wind component in m/s at 850 mb.
+    v : ndarray
+        Meridional (northward) wind component in m/s at 850 mb.
+    t : ndarray
+        Temperature in Kelvin at 850 mb.
+    """
+    print("[MOCK] Loading 850mb fields")
+    lats, lons = get_grid()
+
+    # Generate mock data based on date/hour (for variety)
+    np.random.seed(int(store['day']) + int(store['hour']))
+
+    # Choose pattern based on hour
+    hour = int(store['hour'])
+    if hour < 6:
+        pattern = 'cyclone'
+    elif hour < 12:
+        pattern = 'jet'
+    elif hour < 18:
+        pattern = 'convergence'
+    else:
+        pattern = 'cyclone'
+
+    u, v = _generate_mock_winds(lats, lons, pattern=pattern)
+    t = _generate_mock_temperature(lats, lons, pattern='front')
+
+    return u, v, t
+
+
+# -----------------------------
+# 2. Subsetting
+# -----------------------------
+def subset_box(u, v, t, lats, lons, center_lat, center_lon, half_width=1.0):
+    """
+    Extract a geographic subset of data around a center point.
+
+    Creates a rectangular subset of the input fields based on latitude
+    and longitude bounds. Useful for focusing analysis on a specific region.
+
+    Parameters
+    ----------
+    u : ndarray
+        Zonal wind component, shape (nlat, nlon).
+    v : ndarray
+        Meridional wind component, shape (nlat, nlon).
+    t : ndarray
+        Temperature field, shape (nlat, nlon).
+    lats : ndarray
+        Latitude grid in degrees, shape (nlat, nlon).
+    lons : ndarray
+        Longitude grid in degrees, shape (nlat, nlon).
+    center_lat : float
+        Center latitude of subset region in degrees.
+    center_lon : float
+        Center longitude of subset region in degrees.
+    half_width : float, optional
+        Half-width of the subset box in degrees. Default is 1.0.
+        The total box size will be 2*half_width degrees on each side.
+
+    Returns
+    -------
+    u_subset : ndarray
+        Subsetted zonal wind.
+    v_subset : ndarray
+        Subsetted meridional wind.
+    t_subset : ndarray
+        Subsetted temperature.
+    lats_subset : ndarray
+        Subsetted latitude grid.
+    lons_subset : ndarray
+        Subsetted longitude grid.
+    """
+    lat_idx = np.where((lats[:, 0] >= center_lat - half_width) & (lats[:, 0] <= center_lat + half_width))[0]
+    lon_idx = np.where((lons[0, :] >= center_lon - half_width) & (lons[0, :] <= center_lon + half_width))[0]
+    i0, i1 = lat_idx[0], lat_idx[-1]
+    j0, j1 = lon_idx[0], lon_idx[-1]
+    return (u[i0:i1 + 1, j0:j1 + 1], v[i0:i1 + 1, j0:j1 + 1], t[i0:i1 + 1, j0:j1 + 1],
+            lats[i0:i1 + 1, j0:j1 + 1], lons[i0:i1 + 1, j0:j1 + 1])
+
+
+# -----------------------------
+# 3. Diagnostics
+# -----------------------------
+def vorticity(u, v, lats, lons):
+    """
+    Calculate relative vorticity from horizontal wind components.
+
+    Computes the vertical component of vorticity (curl of horizontal wind)
+    using centered finite differences on a latitude-longitude grid. Accounts
+    for spherical geometry by adjusting grid spacing with latitude.
+
+    Parameters
+    ----------
+    u : ndarray
+        Zonal (east-west) wind component in m/s, shape (nlat, nlon).
+    v : ndarray
+        Meridional (north-south) wind component in m/s, shape (nlat, nlon).
+    lats : ndarray
+        Latitude values in degrees, shape (nlat, nlon).
+    lons : ndarray
+        Longitude values in degrees, shape (nlat, nlon).
+
+    Returns
+    -------
+    ndarray
+        Relative vorticity in s^-1, shape (nlat, nlon).
+        Positive values indicate cyclonic rotation (counterclockwise in NH).
+
+    Notes
+    -----
+    Vorticity is computed as: ζ = ∂v/∂x - ∂u/∂y
+    where derivatives account for spherical Earth geometry.
+    """
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    dy = np.gradient(lat_r, axis=0) * RADIUS_EARTH
+    dx = np.gradient(lon_r, axis=1) * RADIUS_EARTH * np.cos(lat_r)
+    return np.gradient(v, axis=1) / dx - np.gradient(u, axis=0) / dy
+
+
+def convergence(u, v, lats, lons):
+    """
+    Calculate horizontal divergence (negative convergence).
+
+    Computes the horizontal divergence of the wind field using centered
+    finite differences. Note that this function returns divergence, so
+    negative values indicate convergence and positive values indicate divergence.
+
+    Parameters
+    ----------
+    u : ndarray
+        Zonal (east-west) wind component in m/s, shape (nlat, nlon).
+    v : ndarray
+        Meridional (north-south) wind component in m/s, shape (nlat, nlon).
+    lats : ndarray
+        Latitude values in degrees, shape (nlat, nlon).
+    lons : ndarray
+        Longitude values in degrees, shape (nlat, nlon).
+
+    Returns
+    -------
+    ndarray
+        Horizontal divergence in s^-1, shape (nlat, nlon).
+        Negative values = convergence (air coming together).
+        Positive values = divergence (air spreading apart).
+
+    Notes
+    -----
+    Divergence is computed as: D = ∂u/∂x + ∂v/∂y
+    Convergence = -D
+    """
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    dy = np.gradient(lat_r, axis=0) * RADIUS_EARTH
+    dx = np.gradient(lon_r, axis=1) * RADIUS_EARTH * np.cos(lat_r)
+    return np.gradient(u, axis=1) / dx + np.gradient(v, axis=0) / dy
+
+
+def temp_advection(u, v, t, lats, lons):
+    """
+    Calculate temperature advection by horizontal wind.
+
+    Computes the rate of temperature change due to horizontal wind
+    advection. This represents how the wind transports warm or cold
+    air into a region.
+
+    Parameters
+    ----------
+    u : ndarray
+        Zonal wind component in m/s, shape (nlat, nlon).
+    v : ndarray
+        Meridional wind component in m/s, shape (nlat, nlon).
+    t : ndarray
+        Temperature in Kelvin, shape (nlat, nlon).
+    lats : ndarray
+        Latitude values in degrees, shape (nlat, nlon).
+    lons : ndarray
+        Longitude values in degrees, shape (nlat, nlon).
+
+    Returns
+    -------
+    ndarray
+        Temperature advection in K/s, shape (nlat, nlon).
+        Positive values = warm advection (winds bringing warmer air).
+        Negative values = cold advection (winds bringing colder air).
+
+    Notes
+    -----
+    Temperature advection is computed as: -V·∇T = -(u∂T/∂x + v∂T/∂y)
+    The negative sign ensures warm advection is positive.
+    """
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    dy = np.gradient(lat_r, axis=0) * RADIUS_EARTH
+    dx = np.gradient(lon_r, axis=1) * RADIUS_EARTH * np.cos(lat_r)
+    return -(u * np.gradient(t, axis=1) / dx + v * np.gradient(t, axis=0) / dy)
+
+
+def frontogenesis(u, v, t, lats, lons):
+    """
+    Calculate frontogenesis (strengthening of temperature gradients).
+
+    Computes the rate at which horizontal temperature gradients are being
+    strengthened or weakened by the wind field. This simplified formulation
+    relates the temperature gradient magnitude to horizontal divergence.
+
+    Parameters
+    ----------
+    u : ndarray
+        Zonal wind component in m/s, shape (nlat, nlon).
+    v : ndarray
+        Meridional wind component in m/s, shape (nlat, nlon).
+    t : ndarray
+        Temperature in Kelvin, shape (nlat, nlon).
+    lats : ndarray
+        Latitude values in degrees, shape (nlat, nlon).
+    lons : ndarray
+        Longitude values in degrees, shape (nlat, nlon).
+
+    Returns
+    -------
+    ndarray
+        Frontogenesis in K/(m·s), shape (nlat, nlon).
+        Positive values = frontogenesis (strengthening temperature gradient).
+        Negative values = frontolysis (weakening temperature gradient).
+
+    Notes
+    -----
+    Uses simplified formulation: F = -|∇T| × (∂u/∂x + ∂v/∂y)
+    Convergence with strong temperature gradient produces frontogenesis.
+    """
+    lat_r = np.radians(lats)
+    lon_r = np.radians(lons)
+    dy = np.gradient(lat_r, axis=0) * RADIUS_EARTH
+    dx = np.gradient(lon_r, axis=1) * RADIUS_EARTH * np.cos(lat_r)
+    dT_dx = np.gradient(t, axis=1) / dx
+    dT_dy = np.gradient(t, axis=0) / dy
+    du_dx = np.gradient(u, axis=1) / dx
+    dv_dy = np.gradient(v, axis=0) / dy
+
+    # Simplified frontogenesis: |∇T| × (-divergence)
+    # Convergence (negative divergence) = positive frontogenesis
+    grad_T_mag = np.sqrt(dT_dx ** 2 + dT_dy ** 2)
+    divergence = du_dx + dv_dy
+    return -grad_T_mag * divergence
+
+
+# -----------------------------
+# 4. Plotting (lat/lon axes, robust interpolation)
+# -----------------------------
+def plot_field(field, u, v, lats, lons, title, t_field=None, cmap="bwr", levels=20, interp_factor=3):
+    """
+    Create contour plot of meteorological field with wind vectors.
+
+    Generates a filled contour plot with optional temperature contours
+    and wind vectors overlaid. Uses bilinear interpolation to smooth
+    the field for better visualization. The colormap is centered at zero
+    using a two-slope normalization.
+
+    Parameters
+    ----------
+    field : ndarray
+        The meteorological field to plot (vorticity, convergence, etc.),
+        shape (nlat, nlon).
+    u : ndarray
+        Zonal wind component in m/s for wind vectors, shape (nlat, nlon).
+    v : ndarray
+        Meridional wind component in m/s for wind vectors, shape (nlat, nlon).
+    lats : ndarray
+        Latitude grid in degrees, shape (nlat, nlon).
+    lons : ndarray
+        Longitude grid in degrees, shape (nlat, nlon).
+    title : str
+        Plot title and colorbar label.
+    t_field : ndarray, optional
+        Temperature field in Kelvin for black contour overlay. If None,
+        no temperature contours are drawn. Default is None.
+    cmap : str, optional
+        Matplotlib colormap name. Default is 'bwr' (blue-white-red).
+    levels : int, optional
+        Number of filled contour levels. Default is 20.
+    interp_factor : int, optional
+        Grid refinement factor for interpolation. Higher values produce
+        smoother fields but take longer to compute. Default is 3.
+
+    Returns
+    -------
+    None
+        Displays the plot using plt.show().
+
+    Notes
+    -----
+    Wind vectors are subsampled to approximately 30 arrows across the
+    plot for readability. NaN values in the interpolated field are
+    filled using nearest-neighbor interpolation.
+    """
+    # Create fine grid
+    nlat, nlon = lats.shape[0] * interp_factor, lats.shape[1] * interp_factor
+    lat_new = np.linspace(lats.min(), lats.max(), nlat)
+    lon_new = np.linspace(lons.min(), lons.max(), nlon)
+    lon_new2d, lat_new2d = np.meshgrid(lon_new, lat_new)
+
+    # Interpolate with fallback for NaNs
+    points = np.column_stack((lats.flatten(), lons.flatten()))
+    values = field.flatten()
+    field_fine = griddata(points, values, (lat_new2d, lon_new2d), method='linear')
+    # Fill remaining NaNs with nearest
+    nan_mask = np.isnan(field_fine)
+    if np.any(nan_mask):
+        field_fine[nan_mask] = griddata(points, values, (lat_new2d[nan_mask], lon_new2d[nan_mask]), method='nearest')
+
+    # Normalize
+    vmin, vmax = np.nanmin(field_fine), np.nanmax(field_fine)
+    if np.isclose(vmin, vmax):
+        vmax = vmin + 1e-6
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+
+    # 2D plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    cf = ax.contourf(lon_new2d, lat_new2d, field_fine, levels=levels, cmap=cmap, norm=norm)
+    plt.colorbar(cf, label=title)
+
+    # Wind vectors
+    step = max(1, int(u.shape[0] / 30))
+    ax.quiver(lons[::step, ::step], lats[::step, ::step],
+              u[::step, ::step], v[::step, ::step],
+              width=0.003, scale=200, headwidth=3.5)
+
+    # Optional temperature lines
+    if t_field is not None:
+        t_fine = griddata(points, t_field.flatten(), (lat_new2d, lon_new2d), method='linear')
+        t_nan_mask = np.isnan(t_fine)
+        if np.any(t_nan_mask):
+            t_fine[t_nan_mask] = griddata(points, t_field.flatten(),
+                                          (lat_new2d[t_nan_mask], lon_new2d[t_nan_mask]), method='nearest')
+        cs = ax.contour(lon_new2d, lat_new2d, t_fine, colors='black', linewidths=1)
+        ax.clabel(cs, inline=1, fontsize=10, fmt="%1.0f K")
+
+    # Axes only
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(title)
+    plt.show()
+
+
+# -----------------------------
+# 5. Main workflow
+# -----------------------------
+def main(day, hour, clat, clon, half_width, plots_to_generate):
+    """
+    Main workflow to compute and plot HRRR 850 mb diagnostics.
+
+    Loads HRRR data from AWS S3, extracts a geographic subset, computes
+    selected meteorological diagnostics, and generates plots with wind
+    vectors and temperature contours.
+
+    Parameters
+    ----------
+    day : str
+        Date in YYYYMMDD format (e.g., '20210202').
+    hour : str
+        Hour in HH format, 00-23 (e.g., '12').
+    clat : float
+        Center latitude for subset region in degrees.
+    clon : float
+        Center longitude for subset region in degrees.
+    half_width : float
+        Half-width of subset box in degrees.
+    plots_to_generate : dict
+        Dictionary specifying which plots to create. Keys are diagnostic
+        names ('vorticity', 'convergence', 'temp_advection', 'frontogenesis')
+        and values are boolean (True = plot, False = skip).
+
+    Returns
+    -------
+    None
+        Displays selected plots using matplotlib.
+    """
+    print("\n" + "=" * 60)
+    print("MOCK HRRR METEOROLOGICAL DIAGNOSTICS")
+    print("=" * 60)
+
+    store = get_store(day, hour, level_type="prs", model_type="anl")
+    lats, lons = get_grid()
+    u, v, t = load_h85(store)
+
+    u_s, v_s, t_s, lat_s, lon_s = subset_box(u, v, t, lats, lons, clat, clon, half_width)
+
+    print(f"Subset size: {u_s.shape}")
+    print(f"Lat range: {lat_s.min():.1f} to {lat_s.max():.1f}")
+    print(f"Lon range: {lon_s.min():.1f} to {lon_s.max():.1f}")
+    print("=" * 60 + "\n")
+
+    # Generate selected plots
+    if plots_to_generate.get('vorticity', False):
+        print("Computing vorticity...")
+        plot_field(vorticity(u_s, v_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Vorticity", t_field=t_s)
+
+    if plots_to_generate.get('convergence', False):
+        print("Computing convergence...")
+        plot_field(convergence(u_s, v_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Convergence", t_field=t_s)
+
+    if plots_to_generate.get('temp_advection', False):
+        print("Computing temperature advection...")
+        plot_field(temp_advection(u_s, v_s, t_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Temp Advection",
+                   t_field=t_s)
+
+    if plots_to_generate.get('frontogenesis', False):
+        print("Computing frontogenesis...")
+        plot_field(frontogenesis(u_s, v_s, t_s, lat_s, lon_s), u_s, v_s, lat_s, lon_s, "850 mb Frontogenesis",
+                   t_field=t_s)
+
+    print("\n[MOCK] All plots complete!")
+
+
+if __name__ == "__main__":
+    # ========================================
+    # USER CONFIGURATION - CHOOSING PLOTS TO RETURN
+    # ========================================
+
+    # Data parameters
+    day = "20210202"  # Example is 02/02/2021
+    hour = "12"  # Example is 12 UTC
+    clat, clon = 40.0, -95.0  # Example is 40N, 95W
+    half_width = 2.0  # Half width is the distance in degrees from the center point (basically how large the region is).
+
+    # Select which plots to generate (True = plot, False = skip)
+    plots_to_generate = {
+        'vorticity': True,
+        'convergence': True,
+        'temp_advection': True,
+        'frontogenesis': True
+    }
+
+    # ========================================
+    # END USER CONFIGURATION
+    # ========================================
+
+    main(day, hour, clat, clon, half_width, plots_to_generate)
