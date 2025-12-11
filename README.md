@@ -20,7 +20,7 @@ A Walkthrough:
 - This is where the equations for vorticity, convergence, temperature advection, and frontogenesis are generated. The user can use this section to add more code if they wanted to create more analysis plots.
 
 4. Plotting (lat/lon axes, robust interpolation)
-- This section is where we create the plot of temperature and wind using the HRRR data. Bilinear interpolation is used in this section to smooth the contours for a nicer look. There is a also code that takes into account the NAN values. For a NAN value, it gets filled using its nearest point interpolation.
+- This section is where we create the plot of temperature and wind using the HRRR data. Bilinear interpolation is used in this section to smooth the contours for a nicer look. There is also code that takes into account the NAN values. For a NAN value, it gets filled using its nearest point interpolation.
 - Temperature lines are also added in this section for a better analysis.
 - Lastly, lat/lon axes are created for the plots to get a better visualization of the region.
 
